@@ -21,35 +21,152 @@ def writeErrorLog(msg):
     with open(cfg.ERROR_LOG_FILE, 'a') as elog:
         elog.write(msg + '\n')
 
-def resultPooling(lines, num_results=5, pmode='avg'):
+# def resultPooling(lines, num_results=5, pmode='avg'):
+#
+#     # Parse results
+#     results = {}
+#     for line in lines:
+#         d = line.split('\t')
+#         species = d[2].replace(', ', '_')
+#         score = float(d[-1])
+#         if not species in results:
+#             results[species] = []
+#         results[species].append(score)
+#
+#     # Compute score for each species
+#     for species in results:
+#
+#         if pmode == 'max':
+#             results[species] = max(results[species])
+#         else:
+#             results[species] = sum(results[species]) / len(results[species])
+#
+#     # Sort results
+#     results = sorted(results.items(), key=lambda x: x[1], reverse=True)
+#
+#     return results[:num_results]
 
-    # Parse results
+
+def resultPooling(lines, num_results=5, pmode='avg'):
+    # Initialize dictionaries to store results and max score intervals
     results = {}
+    max_score_intervals = {}
+
+    # Iterate through each line in the input data
     for line in lines:
+        # Split the line into components: start_time, end_time, species, and score
         d = line.split('\t')
+        start_time, end_time = float(d[0]), float(d[1])
         species = d[2].replace(', ', '_')
         score = float(d[-1])
+        time_interval = (start_time, end_time)
+
+        # Initialize the species entry in the results dictionary if not present
         if not species in results:
-            results[species] = []
-        results[species].append(score)
+            results[species] = {
+                'scores': [],
+                'intervals': []
+            }
 
-    # Compute score for each species
+            # Add the score and interval to the species' results
+        results[species]['scores'].append(score)
+        results[species]['intervals'].append(time_interval)
+
+        # Initialize a dictionary to store the results grouped by time intervals
+    interval_results = {}
+
+    # Iterate through the results dictionary
     for species in results:
+        # Calculate the average score for the species
+        avg_score = sum(results[species]['scores']) / len(results[species]['scores'])
 
-        if pmode == 'max':
-            results[species] = max(results[species])
+        # If pmode is 'avg', assign the average score to the species
+        if pmode == 'avg':
+            results[species]['score'] = avg_score
+            # If pmode is 'max', assign the max score and interval to the species
         else:
-            results[species] = sum(results[species]) / len(results[species])
+            max_score = max(results[species]['scores'])
+            max_score_index = results[species]['scores'].index(max_score)
+            max_score_interval = results[species]['intervals'][max_score_index]
+            results[species]['score'] = max_score
+            results[species]['interval'] = max_score_interval
 
-    # Sort results
-    results = sorted(results.items(), key=lambda x: x[1], reverse=True)
+            # Sort the results by score in descending order and take the top num_results species
+    sorted_results = sorted(results.items(), key=lambda x: x[1]['score'], reverse=True)[:num_results]
 
-    return results[:num_results]
+    # Iterate through the sorted results
+    for species, species_data in sorted_results:
+        # Get the time interval where the max or average score was detected
+        time_interval = species_data['interval'] if pmode == 'max' else species_data['intervals'][0]
+
+        # Convert the interval key to a string format "x; y"
+        interval_key = f"{time_interval[0]};{time_interval[1]}"
+
+        # If the interval_key is not in the interval_results dictionary, add it
+        if interval_key not in interval_results:
+            interval_results[interval_key] = []
+
+            # Add the species and score to the appropriate interval_key in interval_results
+        interval_results[interval_key].append((species, species_data['score']))
+
+    return interval_results
+
 
 @bottle.route('/healthcheck', method='GET')
 def healthcheck():
     data = {'msg': 'Server is healthy.'}
     return json.dumps(data)
+
+
+@bottle.route('/predictedspecies')
+def predicted_species():
+    # Extract the input parameters from the query string
+    latitude = float(bottle.request.query.get('latitude'))
+    longitude = float(bottle.request.query.get('longitude'))
+    week_number = int(bottle.request.query.get('week_number'))
+    sf_thresh = float(bottle.request.query.get('sf_thresh'))
+    locale = bottle.request.query.get('locale')
+
+    # get localized common names
+    lfile = os.path.join(cfg.TRANSLATED_LABELS_PATH, os.path.basename(cfg.LABELS_FILE).replace('.txt', '_{}.txt'.format(locale)))
+    if not locale in ['en'] and os.path.isfile(lfile):
+        print('Getting Translated Labels', flush=True)
+        cfg.TRANSLATED_LABELS = analyze.loadLabels(lfile)
+    else:
+        print('Not Getting Translated Labels', flush=True)
+        cfg.TRANSLATED_LABELS = cfg.LABELS
+
+    cfg.LATITUDE = latitude
+    cfg.LONGITUDE = longitude
+    cfg.WEEK = week_number
+    cfg.LOCATION_FILTER_THRESHOLD = sf_thresh
+
+    specieslistwithscores = analyze.predictSpeciesListWithScore()
+
+    # Convert the data to a JSON string
+    species_list_json = json.dumps(specieslistwithscores)
+
+    # Set the 'Content-Type' header to 'application/json' and return the JSON data
+    bottle.response.content_type = 'application/json'
+    return species_list_json
+
+
+@bottle.route('/getlabels')
+def get_labels():
+    file_path = os.path.join('checkpoints', 'V2.3', 'BirdNET_GLOBAL_3K_V2.3_Labels.txt')
+
+    # Check if the file exists
+    if os.path.exists(file_path):
+        with open(file_path, 'r') as file:
+            contents = file.read()
+
+            # Set the response content type to 'text/plain'
+        bottle.response.content_type = 'text/plain'
+        return contents
+    else:
+        bottle.response.status = 404
+        return "File not found"
+
 
 @bottle.route('/analyze', method='POST')
 def handleRequest():
@@ -104,7 +221,17 @@ def handleRequest():
 
     # Analyze file
     try:
-        
+
+        # get the right labels
+        if 'locale' in mdata:
+            locale = mdata['locale']
+            lfile = os.path.join(cfg.TRANSLATED_LABELS_PATH,
+                                 os.path.basename(cfg.LABELS_FILE).replace('.txt', '_{}.txt'.format(locale)))
+            if not locale in ['en'] and os.path.isfile(lfile):
+                cfg.TRANSLATED_LABELS = analyze.loadLabels(lfile)
+            else:
+                cfg.TRANSLATED_LABELS = cfg.LABELS
+
         # Set config based on mdata
         if 'lat' in mdata and 'lon' in mdata:
             cfg.LATITUDE = float(mdata['lat'])
@@ -145,6 +272,9 @@ def handleRequest():
                 for line in f.readlines():
                     lines.append(line.strip())
 
+            #print("Lines comin' atcha:", flush=True)
+            #print(lines, flush=True)
+
             # Pool results
             if 'pmode' in mdata and mdata['pmode'] in ['avg', 'max']:
                 pmode = mdata['pmode']
@@ -155,6 +285,9 @@ def handleRequest():
             else:
                 num_results = 5
             results = resultPooling(lines, num_results, pmode)
+
+            print("Results:")
+            print(results, flush=True)
 
             # Prepare response
             data = {'msg': 'success', 'results': results, 'meta': mdata}

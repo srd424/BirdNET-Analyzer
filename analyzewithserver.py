@@ -77,21 +77,6 @@ def predictSpeciesList():
         if s[0] >= cfg.LOCATION_FILTER_THRESHOLD:
             cfg.SPECIES_LIST.append(s[1])
 
-
-def predictSpeciesListWithScore():
-
-    l_filter = model.explore(cfg.LATITUDE, cfg.LONGITUDE, cfg.WEEK)
-
-    specieswithscore = []
-
-    for s in l_filter:
-        if s[0] >= cfg.LOCATION_FILTER_THRESHOLD:
-            speciestuple = (s[1], float(s[0]))
-            specieswithscore.append(speciestuple)
-
-    return specieswithscore
-
-
 def saveResultFile(r, path, afile_path):
 
     # Make folder if it doesn't exist
